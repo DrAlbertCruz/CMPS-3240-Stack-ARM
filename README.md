@@ -1,10 +1,10 @@
-# CMPS 3240 Lab: Control of flow with ARM
+# CMPS 3240 Lab: Stack Linkage with ARMv8
 
 ## Objectives
 
 During this lab you will:
 
-* Learn about ARM64 stack linkage
+* Learn about ARMv8 stack linkage
 * Use `gcc` to assemble examples of ARM stack linkage
 * Implement a recursive version of Fibonacci
 
@@ -42,72 +42,98 @@ This lab requires the departmental ARM server. It will not work on `odin.cs.csub
 
 ## Background
 
-The purpose of this lab is to understand stack linkage (also called calling convention or call convention). A stack linkage defines how processes interact with each other. It defines how the stack should be used, what the caller and callee behavior are, and how the registers should be used. So, which stack linkage should be used? A process uses a specific linkage depending on the instruction set architecture (ISA) being used, and what operating system you're using. Some examples are Microsoft x64 calling convention and System V AMD64 ABI for x86-64 ISAs.<sup>a</sup> With low-level systems applications,  a project may implement their own stack linkage and long-running, legacy projects may have multiple stack linkages within the same project.<sup>b</sup> ARM has a specific stack linkage defined in the following document and this will be the topic of the lab today.<sup>1, c</sup> 
+The purpose of this lab is to understand stack linkage (also called calling convention or call convention). A stack linkage defines how processes (or subroutines) interact with each other. It defines how the stack should be used, what the caller and callee behaviors are, and how the registers should be used. So, which stack linkage should be used? A process uses a specific linkage depending on the instruction set architecture (ISA) being used, and what operating system you're using. Some examples are Microsoft x64 calling convention and System V AMD64 ABI for x86-64 ISAs. With low-level systems applications, a project may implement their own stack linkage and long-running, legacy projects may have multiple stack linkages within the same project.
+
+For ARMv8, the specific linkage we will discuss is largely defined by the **ARMv8 ABI** (often called AArch64 or ARM64), which in Linux-based systems aligns with the **AArch64 ELF (System V) ABI** used by GCC.<sup>1</sup> This will be the topic of the lab today.
+
+A stack linkage (or calling convention) specifies the following:
+
 
 A stack linkage specifies the following:
 
-1. How registers should be used
-2. How the stack should be used
-3. Behavior of how a subroutine calls another subroutine. The subroutine making the call is called the *caller*. The subroutine being called is called the *callee*.
+1. How registers should be used: which registers are used to pass arguments, which registers are preserved by callees, etc.
+2. How the stack should be used: including where to store local variables, saved registers, and alignment rules.
+3. Behavior of how a subroutine (callee) is called by another subroutine (caller).
 
-For this lab, the number of arguments passed between the callee and caller should be known and fixed.<sup>d</sup>
+For this lab, the number of arguments passed between the callee and caller should be known and fixed. It is possible to have a variable number of arguments, but we will not cover this.
 
 ### Registers
 
-Some registers are *saved registers*. That is, if a callee uses the register--modifies the values originally in the register--they must be restored by the callee before returning to the caller. Other registers are *unsaved registers*. The callee can freely use and clobber the values in these registers, and does not need to restore their original values. The ARM calling convention specifies the following:
+In ARMv8 (AArch64) System V ABI, registers have specific roles regarding whether they must be preserved by the callee or not:
 
-* Registers 0 to 7 are unsaved registers for passing arguments<sup>e</sup>
-* A subroutine passes the return value through register 0
-* Registers 9 to 15 are unsaved registers for scratch work
-* Registers 19 to 28 are saved registers for scratch work 
-* Register 29 is a saved register, called the *frame pointer*
-* Register 30 is a saved register, called the *link pointer*. `bl` places the return address in this register and then jumps. `ret` returns to the address specified in this register.
-* The stack pointer (`sp`) register is a saved register that should always point to the end of the stack. Values higher than `sp` contain valid data. Values lower than `sp` contain garbage. 
-* Other registers not described here have specific purposes that go beyond the scope of this class.
+Callee-saved (must be restored by the callee if modified)
+
+- `x19` to `x28` 
+- `x29`: Frame pointer, also known as **FP**  
+- `x30`: Link register, also known as **LR**. Used when saving for non-leaf functions.  
+- The **stack pointer** (\(sp\)) is also conceptually callee-saved and must always point to the current stack top.
+
+Caller-saved (free to clobber)
+
+- `x0` to `x7` are used for passing up to 8 integer/pointer arguments to functions.
+- `x8` is often used as an indirect result location register or for other scratch purposes, depending on the ABI.  
+- `x9` to `x15` are also caller-saved (scratch) registers.
+
+Return value 
+
+- For integer/pointer return values, x0 is used to return the result of the function. Note this is the biggest difference from MIPS as discussed in class. MIPS has separate sets of registers for input and output. ARMv8 will use the same register.  
+
+Caller-saved means the caller must preserve those registers if it needs them later. Callee-saved means the callee must preserve (push/pop) them if it modifies them. Typically, since you are coding from the perspective of the caller, you do not need to save caller-saved registers.
 
 ### Stack
 
-The stack lives in the memory. It holds temporary variables and data used by the current process. Generally it starts at a high addresses and grows downward. There is a pointer called the stack pointer `sp` that points to bottom of the stack. When a process needs stack space it allocates space by subtracting the stack pointer (recall that it starts high and grows downward). It is then free to use this newly allocated space (between the old value of the stack pointer and the new value). This area is called a *stack record* or frame. There is a danger that uncontrolled growth of the stack will cause it to grow into other parts of the memory, such as the heap.
 
-Specific to the environment in this course the frame pointer should shadow the stack pointer. The old value of the frame pointer should be shadowed onto the stack. Thus, the stack records in ARM form a linked list. This is different from other calling conventions.<sup>f</sup>
+The stack lives in memory and generally starts at a high address and grows downward. The stack pointer points to the end (bottom) of the stack; addresses above `sp` contain valid data, while addresses below `sp` contain garbage. When a process or function needs stack space, it allocates by subtracting from the stack pointer, reserving that space for local variables, spill slots, or saved registers. This area is often called a **stack frame** or **stack record**.
 
-ARM calling convention also specifies the following:
-* The lowest addressed double-word in the frame record should contain the old frame pointer
-* The second lowest addressed double-word in the frame record should contain the value passed in LR on entry to the current function 
-* The stack must be quad word aligned
-* To save values onto the stack the stack pointer must have been moved beforehand, or allocate space as needed with an arithmetic operation (such as `sub` or pre-indexed addressing). Then, use `str` or `stp` instruction to place the values relative to `sp`.<sup>g</sup> Example:
+Specific to the ARMv8 ABI (and to keep consistency with tools like GDB), the frame pointer `x29` typically **shadows** the stack pointer (points to the base of the current frame). At the function entry, the old frame pointer is **saved** on the stack, and the new frame pointer is set to the current `sp`—this forms a linked list of stack frames.
+
+The ARMv8 ABI also mandates:
+
+- The lowest addressed double-word in the frame record should contain the old frame pointer `x29`.  
+- The second lowest addressed double-word in the frame record should contain the old link register `x30` (the return address passed from the caller).  
+- The stack must be 16-byte (quad-word) aligned at all externally visible call boundaries. Failing to do so will cause a bus error on runtime and crash your program--I learned this the hard way during a classroom demonstration.
+- To save values on the stack, you must first move (subtract) the stack pointer. Then you can use `str`, `stp` (store pair), or pre-indexed addressing to place values relative to `sp`.  
+- To restore values from the stack, you can use `ldr`, `ldp`, or post-indexed addressing to pull values back into registers and move `sp` back up.
+
 ```arm
 # Simple example
 sub sp, sp, 16
 str x0, [sp, 16]
 ```
 Another example using pre-indexing:
+
 ```arm
 # Recall that pre-index modifies the pointer before dereference
 str x0, [sp, 16]!
 ```
-* To load values from the stack use `ldr` or `ldp` commands pull values from the stack. Addressing is relative to `sp`.
+
+This instruction combines both of the previous operations in a single hardware-level instruciton.
 
 ### Caller Notes
 
 Things the caller should do before jumping to the callee with `bl`:
 
-* The first 8 arguments are passed in registers, in order. The first argument is stored in `0`, the second argument is stored in `1` and so on.
-* The size of the argument dicatates which register to use (`w` or `x`)
-* Arguments greater than 8 are passed on the stack. The order is reversed; the last argument is in the highest address.
+- The first 8 arguments are passed in registers, in order. The first argument is stored in `0`, the second argument is stored in `1` and so on.The size of the argument dicatates which register to use (`w` or `x`)
+- If there are more than 8 arguments, the rest go on the stack in reverse order (so the last argument ends up at the highest address).
+- Ensure that the stack is correctly aligned (16-byte alignment), if stack is used.
 
-After the above, the caller calls the callee with branch-and-link (`bl`) which saves the return address to the link register `x30`.
+After the above, the caller calls the callee with branch-and-link (`bl`) which automatically saves the return address to the link register `x30`.
 
 ### Callee Notes
 
 Things the callee should do the following:
 
-1. Set up its frame record. If this is a leaf function--it call no other subroutines--the first instruction is often to move the stack pointer `sp` with a `sub` instruction. Example:
+Set up its frame record. If this is a leaf function--it call no other subroutines--the first instruction is often to move the stack pointer `sp` with a `sub` instruction. Example, if this is a leaf function:
 
 ```arm
 myfunc:
 sub sp, sp, 32
+...
+add sp, sp, 32
+ret
 ```
+
+No need to save the old frame pointer or link register if we aren’t calling further subroutines (and if we’re not using x29 for anything).
 
 However, if it is a non-leaf function, it must comply with the points we discussed above. Here is an example that adheres to everything:
 
@@ -130,19 +156,22 @@ stp x29, x30, [sp, -128]!
 add x29, sp, 0
 ```
 
-2. The first 8 input arguments are shadowed onto the stack. This is a standard operation specified by the convention, even if it may be wasteful. Use the `str` instruction to copy the input arguments onto the stack. The first argument is stored in the lowest position on the stack. Note that we do not need to shadow arguments that are on the stack because they were already placed onto the stack by the caller. Example:
+Shadow the first 8 input arguments onto the stack (if your convention or project guidelines require it). The System V ABI for AArch64 does not strictly require shadowing unless you need to modify/spill them, but many coding guidelines or debuggers assume this is done, especially for easier debugging or if you might need the original arguments later. Example:
 
 ```arm
-myfunction: 
-# Some leaf, only valid if there is more than 8 arguments!!
-sub sp, sp, 16
-ldr x0, [sp, 0]
-ldr x1, [sp, 8]
+myfunction:
+// Suppose we want to pre-allocate 128 bytes. 
+stp x29, x30, [sp, -128]!
+add x29, sp, 0
+
+str w0, [sp, 16]
+str w1, [sp, 20]
+...
 ```
 
-3. Perform the intended logic of the subroutine
+The above example assumes the function was passed to `int` arguments. Then, perform the intended logic of the subroutine
 
-4. When quitting, the callee should restore the stack pointer, link pointer and frame pointer to its original values before returning (`ret`). Example:
+When quitting, the callee should restore the stack pointer, link pointer and frame pointer to its original values before returning (`ret`). Example:
 
 ```arm
 myfunction:
